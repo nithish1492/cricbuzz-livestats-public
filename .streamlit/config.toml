@@ -1,6 +1,7 @@
 [server]
 enableWebsocketCompression = false
-headless = false
+headless = true
+
 
 [browser]
 gatherUsageStats = false
