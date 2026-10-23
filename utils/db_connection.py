@@ -1,7 +1,8 @@
+
 """PostgreSQL connection helpers for Cricbuzz LiveStats.
 
 Uses DATABASE_URL from environment/.env or Streamlit secrets.
-Provides a small compatibility layer for existing SQLite-style SQL placeholders.
+Provides compatibility for SQLite-style SQL placeholders.
 """
 from __future__ import annotations
 
@@ -12,16 +13,22 @@ from pathlib import Path
 import pandas as pd
 import psycopg
 from dotenv import load_dotenv
-from psycopg.rows import tuple_row
 
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
-TABLES = ("players", "matches", "venues", "series", "player_match_stats")
+TABLES = (
+    "players",
+    "matches",
+    "venues",
+    "series",
+    "player_match_stats",
+)
 
 
 class HybridRow(dict):
-    """Mapping row that supports both row['column'] and row[0] access."""
+    """Row supporting both row['column'] and row[0] access."""
+
     def __init__(self, names, values):
         super().__init__(zip(names, values))
         self._values = tuple(values)
@@ -33,35 +40,43 @@ class HybridRow(dict):
 
 
 def _hybrid_row(cursor):
-    names = [column.name for column in cursor.description]
+    """Create rows using column names available when a result is fetched."""
+
     def make_row(values):
+        description = cursor.description or ()
+        names = [column.name for column in description]
         return HybridRow(names, values)
+
     return make_row
 
 
 def _database_url():
     url = os.getenv("DATABASE_URL", "").strip()
+
     if not url:
         try:
             import streamlit as st
             url = str(st.secrets.get("DATABASE_URL", "")).strip()
         except Exception:
             url = ""
+
     if not url or "YOUR_" in url or "NEW_PASSWORD" in url:
         raise RuntimeError(
             "DATABASE_URL is missing. Set it in your local .env file or "
             "in Streamlit Community Cloud > App settings > Secrets."
         )
+
     return url
 
 
 def _translate_sql(query):
-    """Translate SQLite qmark/named parameters to psycopg placeholders."""
-    # Convert named :key placeholders, but don't alter PostgreSQL :: casts.
-    query = re.sub(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)", r"%(\1)s", query)
-    # Existing project uses qmark placeholders only inside SQL statements.
-    query = query.replace("?", "%s")
-    return query
+    """Translate SQLite-style placeholders to psycopg placeholders."""
+    query = re.sub(
+        r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)",
+        r"%(\1)s",
+        query,
+    )
+    return query.replace("?", "%s")
 
 
 class CursorAdapter:
@@ -69,18 +84,25 @@ class CursorAdapter:
         self._cursor = cursor
 
     def execute(self, query, params=None):
+        query = _translate_sql(query)
+
         if params is None:
-            self._cursor.execute(_translate_sql(query))
+            self._cursor.execute(query)
         else:
-            self._cursor.execute(_translate_sql(query), params)
+            self._cursor.execute(query, params)
+
         return self
 
     def executemany(self, query, params_seq):
-        self._cursor.executemany(_translate_sql(query), params_seq)
+        self._cursor.executemany(
+            _translate_sql(query),
+            params_seq,
+        )
         return self
 
     def fetchone(self):
-        return self._cursor.fetchone()
+        row = self._cursor.fetchone()
+        return row
 
     def fetchall(self):
         return self._cursor.fetchall()
@@ -105,7 +127,9 @@ class ConnectionAdapter:
         return CursorAdapter(cursor).executemany(query, params_seq)
 
     def cursor(self, *args, **kwargs):
-        return CursorAdapter(self._connection.cursor(*args, **kwargs))
+        return CursorAdapter(
+            self._connection.cursor(*args, **kwargs)
+        )
 
     def close(self):
         self._connection.close()
@@ -121,32 +145,51 @@ class ConnectionAdapter:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        return self._connection.__exit__(exc_type, exc_value, traceback)
+        return self._connection.__exit__(
+            exc_type,
+            exc_value,
+            traceback,
+        )
 
     def __getattr__(self, name):
         return getattr(self._connection, name)
 
 
 def get_connection():
-    conn = psycopg.connect(
+    
+    connection = psycopg.connect(
         _database_url(),
         sslmode="require",
         row_factory=_hybrid_row,
         autocommit=False,
+        prepare_threshold=None,
     )
-    return ConnectionAdapter(conn)
+    return ConnectionAdapter(connection)
 
 
 def read_sql_query(query, connection, params=None):
-    """Run SQL with psycopg and return a pandas DataFrame."""
-    cursor = connection.execute(query, params) if params is not None else connection.execute(query)
+    """Execute a SELECT query and return a pandas DataFrame."""
+    if params is not None:
+        cursor = connection.execute(query, params)
+    else:
+        cursor = connection.execute(query)
+
     rows = cursor.fetchall()
-    columns = [column.name for column in cursor.description] if cursor.description else []
-    return pd.DataFrame([dict(row) for row in rows], columns=columns)
+    description = cursor.description
+    columns = (
+        [column.name for column in description]
+        if description
+        else []
+    )
+
+    return pd.DataFrame(
+        [dict(row) for row in rows],
+        columns=columns,
+    )
 
 
 def init_db():
-    """Validate the existing Supabase schema; never recreate or wipe tables."""
+    """Validate the existing schema without recreating or wiping tables."""
     with get_connection() as conn:
         rows = conn.execute(
             """
@@ -156,20 +199,31 @@ def init_db():
               AND table_type = 'BASE TABLE'
             """
         ).fetchall()
+
         existing = {row["table_name"] for row in rows}
-        missing = [table for table in TABLES if table not in existing]
+        missing = [
+            table for table in TABLES
+            if table not in existing
+        ]
+
         if missing:
             raise RuntimeError(
-                "Required Supabase tables are missing: " + ", ".join(missing)
-                + ". Do not run a destructive reset; check the schema in Supabase."
+                "Required Supabase tables are missing: "
+                + ", ".join(missing)
+                + ". Check the existing Supabase schema."
             )
+
     return True
 
 
 def table_counts():
+    """Return row counts for the configured database tables."""
     init_db()
+
     with get_connection() as conn:
         return {
-            table: conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            table: conn.execute(
+                f'SELECT COUNT(*) FROM "{table}"'
+            ).fetchone()[0]
             for table in TABLES
         }
