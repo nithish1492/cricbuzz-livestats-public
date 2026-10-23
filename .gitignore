@@ -1,0 +1,31 @@
+﻿# Secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local databases and backups
+*.db
+*.sqlite
+*.sqlite3
+backup_before_*/
+*.bak
+
+# Logs and local editor files
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local review artifacts
+all_python_source_review.txt
+postgres_migration_review.txt
